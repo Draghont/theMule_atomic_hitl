@@ -1,7 +1,7 @@
 console.log("frontend.js starting");
 // Configure the AMD loader for Monaco editor.
 // This tells the loader where to find the editor's source files.
-// require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' } }); // Commented out for now - Monaco CDN loading issue
+require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' } });
 
 /**
  * Main application state object.
@@ -96,12 +96,16 @@ function renderConfigurableUI() {
                 const editorDiv = document.createElement('div');
                 editorDiv.id = `editor-${field.name}`;
                 if (field.placement === 'mainbody') {
-                    editorDiv.style.height = "calc(100% - 120px)";
-                    editorDiv.style.width = "100%";
-                    editorDiv.style.border = "1px solid #ccc";
+                    // Use class for styling now, defined in index.html
+                    editorDiv.className = 'editor-container-style';
+                    // Clear inline styles that might conflict
+                    editorDiv.style.height = "";
+                    editorDiv.style.width = "";
+                    editorDiv.style.border = "";
                 } else {
-                    editorDiv.style.height = "200px";
+                    editorDiv.style.height = "200px"; // Keep for non-mainbody editors if any
                     editorDiv.style.minWidth = "100px";
+                    editorDiv.style.border = "1px solid #dee2e6"; // Use new border color
                 }
                 if (container) container.appendChild(editorDiv);
 
@@ -110,7 +114,8 @@ function renderConfigurableUI() {
                         const editor = monaco.editor.createDiffEditor(editorDiv, {
                             automaticLayout: true,
                             originalEditable: field.originalEditable === true,
-                            readOnly: field.readOnly === true
+                            readOnly: field.readOnly === true,
+                            lineNumbers: 'on' // Added line numbers
                         });
                         editor.setModel({
                             original: monaco.editor.createModel('', field.language || 'text/plain'),
@@ -272,6 +277,12 @@ function initializeHitlUIElements() {
     app.ui.btnApproveThisEdit = document.getElementById('btn-approve-this-edit');
     app.ui.btnRefineThisEdit = document.getElementById('btn-refine-this-edit');
     app.ui.btnDiscardThisEdit = document.getElementById('btn-discard-this-edit');
+    app.ui.loadingSpinner = document.getElementById('loading-spinner'); // Get spinner
+    // Inner loop display elements
+    app.ui.innerLoopHintDisplay = document.getElementById('inner-loop-hint-display');
+    app.ui.innerLoopInstructionDisplay = document.getElementById('inner-loop-instruction-display');
+    app.ui.innerLoopLlmDisplay = document.getElementById('inner-loop-llm-display');
+
 
     showSection('edit-request-input-area', false);
     showSection('location-confirmation-area', false);
@@ -368,8 +379,8 @@ function initializeHitlUIElements() {
 }
 
 // --- Main Execution Block ---
-// require(['vs/editor/editor.main'], () => { // Monaco loader commented out
-  console.log("JS: Checking for qt object before QWebChannel setup...");
+require(['vs/editor/editor.main'], () => { // Monaco loader uncommented
+  console.log("JS: Monaco editor loaded via require. Checking for qt object before QWebChannel setup...");
   if (typeof qt !== 'undefined' && qt.webChannelTransport) {
     console.log("JS: qt object and qt.webChannelTransport found. Proceeding with QWebChannel.");
     new QWebChannel(qt.webChannelTransport, channel => {
@@ -448,6 +459,22 @@ function initializeHitlUIElements() {
                  alert(`DIFF PREVIEW (Widget N/A):\n--- ORIGINAL ---\n${originalSnippet}\n--- EDITED ---\n${editedSnippet}`);
             }
             if (app.activeTaskDetails) app.activeTaskDetails.status = 'awaiting_diff_approval';
+
+            // Populate task details in inner loop
+            if (app.ui.innerLoopHintDisplay && app.activeTaskDetails) {
+                app.ui.innerLoopHintDisplay.textContent = app.activeTaskDetails.original_hint || 'N/A';
+            }
+            if (app.ui.innerLoopInstructionDisplay && app.activeTaskDetails) {
+                app.ui.innerLoopInstructionDisplay.textContent = app.activeTaskDetails.user_instruction || 'N/A';
+            }
+            // LLM info placeholder - can be updated if backend sends this data
+            if (app.ui.innerLoopLlmDisplay && app.activeTaskDetails) {
+                 // Example: if app.activeTaskDetails.llm_model was available
+                 // app.ui.innerLoopLlmDisplay.textContent = app.activeTaskDetails.llm_model || 'N/A';
+                 // For now, we leave it as N/A or set a default if no specific info
+                 app.ui.innerLoopLlmDisplay.textContent = app.activeTaskDetails.llm_model || 'Default LLM (info not specified)';
+            }
+
             updateGlobalUIState(true, 'awaiting_diff_approval');
         });
     } else if (app.api) {
@@ -465,14 +492,25 @@ function initializeHitlUIElements() {
             if (newHint !== null) {
                 const newInstruction = prompt(`Original Instruction: ${currentInstruction}\nEnter new/revised Instruction for this task:`, currentInstruction);
                 if (newInstruction !== null) {
-                    if (app.api) app.api.submitClarificationForActiveTask(newHint, newInstruction);
+                    // User provided both hint and instruction
+                    if (app.api) {
+                        app.api.submitClarificationForActiveTask(newHint, newInstruction);
+                        // UI remains in 'awaiting_clarification' controlled by updateGlobalUIState, backend will send new signals
+                    }
                 } else {
-                    if (app.activeTaskDetails) app.activeTaskDetails.status = 'awaiting_diff_approval';
-                    updateGlobalUIState(true, 'awaiting_diff_approval');
+                    // User cancelled the instruction prompt
+                    console.log("JS: User cancelled instruction prompt during clarification.");
+                    if (app.api) app.api.submitLLMTaskDecision('cancel'); // Cancel the task
+                    // Reset UI to idle or let backend dictate next state via updateViewSignal
+                    if (app.activeTaskDetails) app.activeTaskDetails.status = 'idle'; // Or some other neutral status
+                    updateGlobalUIState(false, 'idle'); // Attempt to reset UI
                 }
             } else {
-                if (app.activeTaskDetails) app.activeTaskDetails.status = 'awaiting_diff_approval';
-                updateGlobalUIState(true, 'awaiting_diff_approval');
+                // User cancelled the hint prompt
+                console.log("JS: User cancelled hint prompt during clarification.");
+                if (app.api) app.api.submitLLMTaskDecision('cancel'); // Cancel the task
+                if (app.activeTaskDetails) app.activeTaskDetails.status = 'idle';
+                updateGlobalUIState(false, 'idle');
             }
         });
     } else if (app.api) {
@@ -535,14 +573,37 @@ function initializeHitlUIElements() {
     }
     if(document.getElementById('queue-status-display')) document.getElementById('queue-status-display').textContent = "Error: Frontend-Backend communication disabled.";
 }
-// }); // Monaco loader commented out
+}); // Monaco loader uncommented
 
 function updateGlobalUIState(isProcessing, activeTaskStatus) {
     console.log("JS: Updating global UI state. isProcessing:", isProcessing, "activeTaskStatus:", activeTaskStatus);
     const userOpenedEditRequest = app.ui.editRequestInputArea ? app.ui.editRequestInputArea.classList.contains('user-opened') : false;
     showSection('edit-request-input-area', !isProcessing && userOpenedEditRequest);
     showSection('location-confirmation-area', isProcessing && activeTaskStatus === 'awaiting_location_confirmation');
-    showSection('inner-loop-decision-area', isProcessing && activeTaskStatus === 'awaiting_diff_approval');
+
+    const showInnerLoop = isProcessing && activeTaskStatus === 'awaiting_diff_approval';
+    showSection('inner-loop-decision-area', showInnerLoop);
+
+    if (showInnerLoop) {
+        if (app.ui.innerLoopHintDisplay && app.activeTaskDetails) {
+            app.ui.innerLoopHintDisplay.textContent = app.activeTaskDetails.original_hint || 'N/A';
+        }
+        if (app.ui.innerLoopInstructionDisplay && app.activeTaskDetails) {
+            app.ui.innerLoopInstructionDisplay.textContent = app.activeTaskDetails.user_instruction || 'N/A';
+        }
+        if (app.ui.innerLoopLlmDisplay && app.activeTaskDetails) {
+            // Assuming activeTaskDetails might be populated with llm_model by the backend in the future
+            app.ui.innerLoopLlmDisplay.textContent = app.activeTaskDetails.llm_model || 'Default LLM (info not specified)';
+        }
+    }
+
+    if (app.ui.loadingSpinner) {
+        if (isProcessing) {
+            app.ui.loadingSpinner.classList.remove('hidden');
+        } else {
+            app.ui.loadingSpinner.classList.add('hidden');
+        }
+    }
 
     if (isProcessing && activeTaskStatus === 'awaiting_clarification') {
         showSection('location-confirmation-area', false);
