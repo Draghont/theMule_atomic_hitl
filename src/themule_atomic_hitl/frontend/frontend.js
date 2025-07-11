@@ -18,7 +18,9 @@ let app = {
   widgets: {},
   api: null,
   ui: {},
-  activeTaskDetails: {}
+  activeTaskDetails: {},
+  activeSelectionDetails: null, // To store captured selection { text, startLine, startColumn, endLine, endColumn }
+  isBackendBusy: false // Flag to track if backend is processing a task
 };
 
 /**
@@ -92,6 +94,37 @@ function renderConfigurableUI() {
             if (field.name === mainDiffWidgetName && mainDiffEditorElement && oldWidgets[mainDiffWidgetName]?.instance?.getDomNode) {
                 app.widgets[field.name] = oldWidgets[mainDiffWidgetName]; // Relink preserved widget
                 console.log(`JS: Re-linked preserved Monaco editor for '${field.name}'.`);
+
+                // Add selection change listener for the "Use Selection as Context" button
+                // Ensure this is the main editor expected to provide context
+                const editorInstance = app.widgets[field.name].instance;
+                if (editorInstance && editorInstance.getModifiedEditor) {
+                    const modifiedEditor = editorInstance.getModifiedEditor();
+                    // It's possible the listener already exists if the editor instance is truly preserved.
+                    // Monaco editor might handle duplicate event subscriptions gracefully, or one might
+                    // consider storing a flag or using disposable event listeners if issues arise.
+                    // For now, re-adding is simpler if Monaco handles it.
+                    modifiedEditor.onDidChangeCursorSelection(() => {
+                        if (app.ui.btnUseSelectionContext) {
+                            const selection = modifiedEditor.getSelection();
+                            const hasSelection = selection && !selection.isEmpty();
+                            const editRequestAreaVisible = app.ui.editRequestInputArea ? !app.ui.editRequestInputArea.classList.contains('hidden') : false;
+
+                            if (editRequestAreaVisible && !app.isBackendBusy) {
+                                if (app.activeSelectionDetails) {
+                                    // If a context is already active, the button is for "Clear".
+                                    app.ui.btnUseSelectionContext.disabled = false;
+                                } else {
+                                    // No active context, button is for "Use Selection". Enable only if there's text selected.
+                                    app.ui.btnUseSelectionContext.disabled = !hasSelection;
+                                }
+                            } else {
+                                // If edit area not visible or backend is busy, button should be disabled.
+                                app.ui.btnUseSelectionContext.disabled = true;
+                            }
+                        }
+                    });
+                }
             } else {
                 const editorDiv = document.createElement('div');
                 editorDiv.id = `editor-${field.name}`;
@@ -123,6 +156,33 @@ function renderConfigurableUI() {
                         });
                         app.widgets[field.name] = { type: 'diff-editor', instance: editor, config: field };
                         console.log(`JS: Created new Monaco editor for '${field.name}'.`);
+
+                        // Add selection change listener for the "Use Selection as Context" button
+                        if (field.name === mainDiffWidgetName) { // Assuming this is the main editor
+                            const modifiedEditor = editor.getModifiedEditor();
+                            modifiedEditor.onDidChangeCursorSelection(() => {
+                                if (app.ui.btnUseSelectionContext) {
+                                    const selection = modifiedEditor.getSelection();
+                                    const hasSelection = selection && !selection.isEmpty();
+                                    const editRequestAreaVisible = app.ui.editRequestInputArea ? !app.ui.editRequestInputArea.classList.contains('hidden') : false;
+
+                                    if (editRequestAreaVisible && !app.isBackendBusy) {
+                                         if (app.activeSelectionDetails) {
+                                            // If a context is already active, the button is for "Clear".
+                                            // It's enabled unless the overall conditions (area visible, not busy) are false (handled by updateGlobalUIState).
+                                            app.ui.btnUseSelectionContext.disabled = false;
+                                        } else {
+                                            // No active context, button is for "Use Selection". Enable only if there's text selected.
+                                            app.ui.btnUseSelectionContext.disabled = !hasSelection;
+                                        }
+                                    } else {
+                                        // If edit area not visible or backend is busy, button should be disabled.
+                                        // This is also set by updateGlobalUIState, but good to be explicit here too.
+                                        app.ui.btnUseSelectionContext.disabled = true;
+                                    }
+                                }
+                            });
+                        }
                     } catch (e) {
                         console.error("Error creating Monaco editor for field:", field.name, e);
                         editorDiv.textContent = `Error creating Monaco editor for '${field.name}'. See console.`;
@@ -267,6 +327,8 @@ function initializeHitlUIElements() {
     app.ui.inputHint = document.getElementById('input-hint');
     app.ui.inputInstruction = document.getElementById('input-instruction');
     app.ui.btnAddtoQueue = document.getElementById('btn-add-to-queue');
+    app.ui.btnUseSelectionContext = document.getElementById('btn-use-selection-context');
+    app.ui.selectionContextStatus = document.getElementById('selection-context-status');
     app.ui.locationConfirmationArea = document.getElementById('location-confirmation-area');
     app.ui.originalHintDisplay = document.getElementById('original-hint-display');
     app.ui.locatedSnippetPreview = document.getElementById('located-snippet-preview');
@@ -287,6 +349,7 @@ function initializeHitlUIElements() {
     showSection('edit-request-input-area', false);
     showSection('location-confirmation-area', false);
     showSection('inner-loop-decision-area', false);
+    updateSelectionContextStatus(); // Initial call
 
     if (app.ui.btnApproveEndSession) {
         app.ui.btnApproveEndSession.onclick = () => {
@@ -325,9 +388,37 @@ function initializeHitlUIElements() {
                 return;
             }
             if (app.api) {
-                app.api.submitEditRequest(hint, instruction);
+                let requestPayload = {
+                    instruction: instruction,
+                    type: '',
+                    selection_details: null,
+                    hint: null
+                };
+
+                if (app.activeSelectionDetails) {
+                    requestPayload.type = 'selection_specific';
+                    requestPayload.selection_details = app.activeSelectionDetails;
+                    console.log("JS: Submitting selection_specific request", requestPayload);
+                } else {
+                    if (!hint) { // Ensure hint is provided if not using selection
+                        alert("Please provide 'Where to Edit?' (Hint) or use 'Use Editor Selection as Context'.");
+                        return;
+                    }
+                    requestPayload.type = 'hint_based';
+                    requestPayload.hint = hint;
+                    console.log("JS: Submitting hint_based request", requestPayload);
+                }
+
+                app.api.submitEditRequest(JSON.stringify(requestPayload)); // Send as JSON string
+
+                // Reset UI
                 if (app.ui.inputHint) app.ui.inputHint.value = '';
                 if (app.ui.inputInstruction) app.ui.inputInstruction.value = '';
+                app.activeSelectionDetails = null;
+                updateSelectionContextStatus(); // Update button and status text
+                if (app.ui.inputHint) app.ui.inputHint.disabled = false;
+
+
                 if (app.ui.editRequestInputArea) {
                      app.ui.editRequestInputArea.classList.remove('user-opened');
                      showSection('edit-request-input-area', false);
@@ -337,6 +428,48 @@ function initializeHitlUIElements() {
             }
         };
     }
+
+    if (app.ui.btnUseSelectionContext) {
+        app.ui.btnUseSelectionContext.onclick = () => {
+            if (app.activeSelectionDetails) {
+                // Clear current selection context
+                app.activeSelectionDetails = null;
+                if (app.ui.inputHint) app.ui.inputHint.disabled = false;
+                updateSelectionContextStatus();
+            } else {
+                // Capture new selection context
+                const mainDiffWidgetConfig = app.config.fields?.find(f => f.type === 'diff-editor' && f.placement === 'mainbody');
+                const mainDiffWidgetName = mainDiffWidgetConfig?.name || 'main_diff';
+                const editorWidget = app.widgets[mainDiffWidgetName];
+
+                if (editorWidget && editorWidget.instance && editorWidget.instance.getModifiedEditor) {
+                    const modifiedEditor = editorWidget.instance.getModifiedEditor();
+                    const selection = modifiedEditor.getSelection(); // This is a Monaco ISelection
+
+                    if (selection && !selection.isEmpty()) {
+                        const selectedText = modifiedEditor.getModel().getValueInRange(selection);
+                        app.activeSelectionDetails = {
+                            text: selectedText,
+                            startLineNumber: selection.startLineNumber,
+                            startColumn: selection.startColumn,
+                            endLineNumber: selection.endLineNumber,
+                            endColumn: selection.endColumn
+                        };
+                        if (app.ui.inputHint) {
+                            app.ui.inputHint.value = `Selection: Lines ${selection.startLineNumber}-${selection.endLineNumber}`;
+                            app.ui.inputHint.disabled = true;
+                        }
+                        updateSelectionContextStatus();
+                    } else {
+                        alert("No text selected in the editor's modified view.");
+                    }
+                } else {
+                    alert("Editor not available to get selection.");
+                }
+            }
+        };
+    }
+
     if (app.ui.btnConfirmLocation) {
         app.ui.btnConfirmLocation.onclick = () => {
             if (app.api && app.activeTaskDetails && app.activeTaskDetails.location_info) {
@@ -376,6 +509,34 @@ function initializeHitlUIElements() {
             else console.error("DiscardThisEdit: app.api not available.");
         };
     }
+}
+
+function updateSelectionContextStatus() {
+    if (!app.ui.btnUseSelectionContext || !app.ui.selectionContextStatus) return;
+
+    if (app.activeSelectionDetails) {
+        app.ui.btnUseSelectionContext.textContent = 'Clear Editor Selection Context';
+        app.ui.btnUseSelectionContext.classList.add('danger'); // Make it look like a "clear" or "cancel" action
+        let displayText = app.activeSelectionDetails.text;
+        if (displayText.length > 50) {
+            displayText = displayText.substring(0, 47) + "...";
+        }
+        app.ui.selectionContextStatus.textContent = `Context: "${displayText}" (Lines ${app.activeSelectionDetails.startLineNumber}-${app.activeSelectionDetails.endLineNumber})`;
+        if (app.ui.inputHint) app.ui.inputHint.disabled = true;
+    } else {
+        app.ui.btnUseSelectionContext.textContent = 'Use Editor Selection as Context';
+        app.ui.btnUseSelectionContext.classList.remove('danger');
+        app.ui.selectionContextStatus.textContent = '';
+        if (app.ui.inputHint) {
+            // Only enable if the edit request area is actually open and not processing
+             const editAreaOpenAndNotProcessing = app.ui.editRequestInputArea &&
+                                             !app.ui.editRequestInputArea.classList.contains('hidden') &&
+                                             (!app.activeTaskDetails || !app.activeTaskDetails.status || app.activeTaskDetails.status === 'idle'); // Simplified check
+            if(editAreaOpenAndNotProcessing) app.ui.inputHint.disabled = false;
+        }
+    }
+    // The general enabled/disabled state of btnUseSelectionContext itself
+    // will be handled by updateGlobalUIState and editor selection change events.
 }
 
 // --- Main Execution Block ---
@@ -576,7 +737,8 @@ require(['vs/editor/editor.main'], () => { // Monaco loader uncommented
 }); // Monaco loader uncommented
 
 function updateGlobalUIState(isProcessing, activeTaskStatus) {
-    console.log("JS: Updating global UI state. isProcessing:", isProcessing, "activeTaskStatus:", activeTaskStatus);
+    app.isBackendBusy = isProcessing; // Set the global flag
+    console.log("JS: Updating global UI state. isProcessing:", isProcessing, "activeTaskStatus:", activeTaskStatus, "app.isBackendBusy:", app.isBackendBusy);
     const userOpenedEditRequest = app.ui.editRequestInputArea ? app.ui.editRequestInputArea.classList.contains('user-opened') : false;
     showSection('edit-request-input-area', !isProcessing && userOpenedEditRequest);
     showSection('location-confirmation-area', isProcessing && activeTaskStatus === 'awaiting_location_confirmation');
@@ -610,10 +772,35 @@ function updateGlobalUIState(isProcessing, activeTaskStatus) {
         showSection('inner-loop-decision-area', false);
     }
 
-    const disableControls = isProcessing && app.api;
+    const disableControls = isProcessing && app.api; // General flag for when backend is busy
+    const editRequestInputAreaVisible = app.ui.editRequestInputArea ? !app.ui.editRequestInputArea.classList.contains('hidden') : false;
+
+    // General controls
     if (app.ui.btnRequestNewEdit) app.ui.btnRequestNewEdit.disabled = disableControls;
     if (app.ui.btnApproveEndSession) app.ui.btnApproveEndSession.disabled = disableControls;
-    if (app.ui.btnAddtoQueue) app.ui.btnAddtoQueue.disabled = disableControls;
+
+    // Controls within the edit request input area
+    // These should be disabled if the area isn't visible OR if the backend is processing.
+    const disableEditRequestInputs = !editRequestInputAreaVisible || disableControls;
+
+    if (app.ui.btnAddtoQueue) app.ui.btnAddtoQueue.disabled = disableEditRequestInputs;
+    if (app.ui.inputInstruction) app.ui.inputInstruction.disabled = disableEditRequestInputs;
+
+    // Special handling for inputHint and btnUseSelectionContext
+    if (app.ui.inputHint) {
+        // Disabled if: edit area hidden, OR backend busy, OR a selection context is active
+        app.ui.inputHint.disabled = disableEditRequestInputs || (app.activeSelectionDetails != null);
+    }
+
+    if (app.ui.btnUseSelectionContext) {
+        // Disabled if: edit area hidden, OR backend busy.
+        // Enabling based on actual editor selection will be handled by onDidChangeCursorSelection (Step 2)
+        // For now, if it *would* be enabled by those conditions, ensure it's not overridden here.
+        app.ui.btnUseSelectionContext.disabled = disableEditRequestInputs;
+    }
+
+    // Always call this to ensure button text/status message is up-to-date
+    updateSelectionContextStatus();
 
     const configActionButtons = document.querySelectorAll(
         '#header-container .action-button, #sidebar-container .action-button, #footer-container .action-button'
