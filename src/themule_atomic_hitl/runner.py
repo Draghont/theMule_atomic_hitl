@@ -190,12 +190,62 @@ class Backend(QObject):
                      logger.error(f"BACKEND (startSession): Error emitting showErrorSignal: {sig_e}")
 
 
-    @pyqtSlot(str, str)
-    def submitEditRequest(self, hint: str, instruction: str):
+    @pyqtSlot(str) # Argument is now a single JSON string
+    def submitEditRequest(self, request_payload_json: str):
         """
-        Slot called by JS to submit a new edit request (hint and instruction).
+        Slot called by JS to submit a new edit request.
+        The request_payload_json is a JSON string containing either:
+        - { type: "hint_based", hint: "...", instruction: "..." }
+        - { type: "selection_specific", selection_details: { text: "...", ...lines/cols... }, instruction: "..." }
         """
-        self.logic.add_edit_request(hint, instruction)
+        try:
+            payload = json.loads(request_payload_json)
+            logger.debug(f"BACKEND (submitEditRequest): Received payload: {payload}")
+
+            request_type = payload.get("type")
+            instruction = payload.get("instruction")
+
+            if not request_type or not instruction:
+                logger.error(f"BACKEND (submitEditRequest): Invalid payload, missing type or instruction: {payload}")
+                self.showErrorSignal.emit("Invalid edit request: type or instruction missing.")
+                return
+
+            if request_type == "hint_based":
+                hint = payload.get("hint")
+                if hint is None: # Check for None explicitly, as empty string might be valid for some reason
+                    logger.error(f"BACKEND (submitEditRequest): Missing hint for hint_based request: {payload}")
+                    self.showErrorSignal.emit("Invalid hint-based request: hint missing.")
+                    return
+                self.logic.add_edit_request(
+                    instruction=instruction,
+                    request_type=request_type,
+                    hint=hint,
+                    selection_details=None
+                )
+            elif request_type == "selection_specific":
+                selection_details = payload.get("selection_details")
+                if not selection_details or not isinstance(selection_details, dict):
+                    logger.error(f"BACKEND (submitEditRequest): Missing or invalid selection_details for selection_specific request: {payload}")
+                    self.showErrorSignal.emit("Invalid selection-specific request: selection_details missing or invalid.")
+                    return
+                self.logic.add_edit_request(
+                    instruction=instruction,
+                    request_type=request_type,
+                    hint=None,
+                    selection_details=selection_details
+                )
+            else:
+                logger.error(f"BACKEND (submitEditRequest): Unknown request type: {request_type}")
+                self.showErrorSignal.emit(f"Unknown edit request type: {request_type}")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"BACKEND (submitEditRequest): JSONDecodeError: {e}. Payload was: {request_payload_json}")
+            self.showErrorSignal.emit(f"Error decoding edit request: {e}")
+        except Exception as e:
+            logger.error(f"BACKEND (submitEditRequest): Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.showErrorSignal.emit(f"Internal error processing edit request: {e}")
 
     @pyqtSlot(dict, str)
     def submitConfirmedLocationAndInstruction(self, confirmed_location_details: Dict[str, Any], original_instruction: str):
@@ -410,54 +460,3 @@ def run_application(initial_data_param: Dict[str, Any],
     else:
         logger.debug("RUNNER.PY: Returning MainWindow instance; event loop managed by caller or already running.")
         return main_window
-
-
-# Example of how to run this for standalone mode (illustrative, actual call from hitl_node.py or examples script)
-if __name__ == '__main__':
-    logger.info("runner.py executed directly (for illustration of standalone-like execution).")
-
-    # This example demonstrates how one might call run_application if it were
-    # the primary entry point, similar to how hitl_node_run would use it.
-
-    # 1. Create Config object (e.g., from a file or default)
-    #    For this example, find examples/config.json relative to project root
-    #    Assumes runner.py is in src/themule_atomic_hitl/
-    project_root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    example_config_path = os.path.join(project_root_dir, "examples", "config.json")
-    if not os.path.exists(example_config_path):
-        print(f"Illustrative run: Example config not found at {example_config_path}, using default config.")
-        app_config = Config() # Default config
-    else:
-        print(f"Illustrative run: Loading config from {example_config_path}")
-        app_config = Config(custom_config_path=example_config_path)
-
-    # 2. Load initial data (e.g., from a file or created in memory)
-    example_data_path = os.path.join(project_root_dir, "examples", "sample_data.json") # Updated name
-    initial_app_data = None
-    if os.path.exists(example_data_path):
-        print(f"Illustrative run: Loading initial data from {example_data_path}")
-        initial_app_data = _load_json_file(example_data_path)
-
-    if not initial_app_data:
-        print("Illustrative run: Sample data file not found or empty. Using minimal default data.")
-        # Use main_editor_modified_field from config to structure default data
-        m_field = app_config.main_editor_modified_field
-        o_field = app_config.main_editor_original_field
-        initial_app_data = {
-            m_field: "Default content for direct runner.py execution.",
-            o_field: "Default content for direct runner.py execution.",
-            "status": "Illustrative Run"
-        }
-
-    # 3. Run the application (managing its own QApplication loop by passing qt_app=None)
-    final_run_data = run_application(initial_app_data, app_config, qt_app=None)
-
-    if final_run_data and isinstance(final_run_data, dict): # Check if it's data
-        print("\n--- run_application (standalone mode) returned final data ---")
-        print(json.dumps(final_run_data, indent=2))
-    elif final_run_data: # It's a MainWindow instance, meaning event loop wasn't run here
-        print("\n--- run_application (library mode) returned MainWindow instance ---")
-        print("Illustrative run: Event loop would need to be managed by caller.")
-    else:
-        print("run_application (standalone mode) did not return data as expected or failed.")
-
