@@ -41,7 +41,7 @@ try:
     # This will work if the package is installed (e.g., via pip install -e .)
     # or if the top-level project directory is in PYTHONPATH.
     from themule_atomic_hitl import hitl_node_run
-    from themule_atomic_hitl.config import Config # Though hitl_node_run handles Config internally
+    from themule_atomic_hitl.config import Config
     from themule_atomic_hitl.logging_config import setup_logging
     logging.debug("Imported themule_atomic_hitl components directly.")
 except ImportError as e_installed:
