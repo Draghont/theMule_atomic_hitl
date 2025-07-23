@@ -214,6 +214,12 @@ class TestSurgicalEditorLogic(unittest.TestCase):
         # --- 3. User provides clarification and retries ---
         current_hint_for_retry = self.editor_logic.active_edit_task['user_hint']
         self.editor_logic.update_active_task_and_retry(current_hint_for_retry, "make it bold")
+        # After retrying, the task should re-enter the location phase
+        self.assertEqual(
+            self.editor_logic.active_edit_task['status'],
+            "awaiting_location_confirmation",
+            "Task status should reset to awaiting_location_confirmation on retry."
+        )
 
         # --- 4. System re-processes, user confirms location again, and new diff is shown ---
         self.assertEqual(self.mock_callbacks['confirm_location_details'].call_count, 2, "Location confirmation should be called a second time for the retry.")

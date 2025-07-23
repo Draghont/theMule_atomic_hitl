@@ -267,9 +267,14 @@ class SurgicalEditorLogic:
         self._notify_view_update()
 
         if self.active_edit_task['type'] == 'hint_based':
-            self.active_edit_task['status'] = 'locating_snippet'
+            # Immediately inform the UI that we are starting the location phase
+            # so the frontend can update its status display before the potentially
+            # long running LLM call begins.
+            self.active_edit_task['status'] = 'awaiting_location_confirmation'
             self._notify_view_update()
-            self._execute_llm_locator_attempt() # Renamed for clarity
+
+            # Now run the locator LLM to determine the snippet location.
+            self._execute_llm_locator_attempt()  # Renamed for clarity
         elif self.active_edit_task['type'] == 'selection_specific':
             # Convert selection_details (line/col) to char offsets and populate location_info
             sel_details = self.active_edit_task['selection_details_from_request']
@@ -443,6 +448,10 @@ class SurgicalEditorLogic:
         # For now, assume active_edit_task['user_instruction'] is the one to use.
         # If UI can change instruction at location confirmation, then:
         # self.active_edit_task['user_instruction'] = original_instruction
+
+        # Inform the UI that we are moving on to editing the located snippet(s)
+        self.active_edit_task['status'] = 'editing_text_on_locations'
+        self._notify_view_update()
 
         # print(f"CORE_LOGIC (proceed_with_edit_after_location_confirmation): Location confirmed for task {self.active_edit_task.get('id')}. Details: {confirmed_location_details}")
         self._initiate_llm_edit_for_task(self.active_edit_task)
@@ -621,7 +630,8 @@ class SurgicalEditorLogic:
         # Update task details with new information. The original_content_snapshot remains the same.
         self.active_edit_task['user_hint'] = new_hint if new_hint else self.active_edit_task['user_hint']
         self.active_edit_task['user_instruction'] = new_instruction if new_instruction else self.active_edit_task['user_instruction']
-        self.active_edit_task['status'] = 'locating_snippet' # Reset status to start locator phase
+        # Reset the state so the UI knows we are repeating the locator phase
+        self.active_edit_task['status'] = 'awaiting_location_confirmation'
         self.active_edit_task['location_info'] = None
         self.active_edit_task['llm_generated_snippet_details'] = None
         self._notify_view_update()
