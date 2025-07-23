@@ -19,13 +19,42 @@ from typing import Dict, Any, Optional, Union # Optional added, Union added
 from PyQt5.QtCore import QObject, pyqtSlot, QUrl, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow
 
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWebChannel import QWebChannel
 
 from .core import SurgicalEditorLogic
 from .config import Config # Import the new Config class
 
 # Using main's _load_json_file for now as it's more robust with error handling
+
+# Get a logger for messages originating from JavaScript.
+js_logger = logging.getLogger("javascript")
+
+class JsConsoleInterceptor(QWebEnginePage):
+    """
+    A custom QWebEnginePage that intercepts messages from the JavaScript
+    console (e.g., console.log, console.error) and redirects them to
+    Python's standard logging system. This is the definitive way to
+    capture all JS logs, especially those that occur during startup.
+    """
+    def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
+        """
+        This method is automatically called by Qt whenever a message
+        is sent to the JavaScript console.
+        """
+        # Map JS log levels to Python log levels.
+        log_level_map = {
+            QWebEnginePage.InfoMessageLevel: logging.INFO,
+            QWebEnginePage.WarningMessageLevel: logging.WARNING,
+            QWebEnginePage.ErrorMessageLevel: logging.ERROR,
+        }
+        python_level = log_level_map.get(level, logging.DEBUG)
+
+        # Format a detailed log message.
+        log_message = f"{message} (source: {sourceId}, line: {lineNumber})"
+
+        # Route the message through Python's logging system.
+        js_logger.log(python_level, log_message)
 
 def _load_json_file(path: str) -> Dict[str, Any]:
     """
@@ -64,22 +93,24 @@ class Backend(QObject):
                                  or data retrieval by a calling library.
     """
 
+    showLlmDisabledWarningSignal = pyqtSignal()
+
     # Signal to update the entire view in JavaScript
-    updateViewSignal = pyqtSignal(object, object, object, name="updateView") # dict -> object
+    updateViewSignal = pyqtSignal(str, str, str)
 
     # Signal to show a diff preview in JavaScript
 
-    showDiffPreviewSignal = pyqtSignal(str, str, str, str, name="showDiffPreview")
+    showDiffPreviewSignal = pyqtSignal(str, str, str, str)
 
     # Signal to request clarification from the user for an active LLM task
-    requestClarificationSignal = pyqtSignal(name="requestClarification")
+    requestClarificationSignal = pyqtSignal()
 
     # Signal to show an error message in JavaScript
-    showErrorSignal = pyqtSignal(str, name="showError")
+    showErrorSignal = pyqtSignal(str)
 
     # Signal to prompt the user to confirm the location of a snippet found by the locator
 
-    promptUserToConfirmLocationSignal = pyqtSignal(object, str, str, name="promptUserToConfirmLocation") # dict -> object
+    promptUserToConfirmLocationSignal = pyqtSignal(str, str, str)
 
     # Signal to indicate session termination, so the calling function can retrieve data
     sessionTerminatedSignal = pyqtSignal()
@@ -104,10 +135,17 @@ class Backend(QObject):
             'request_clarification': self.on_request_clarification,
             'show_error': self.on_show_error,
             'confirm_location_details': self.on_confirm_location_details,
+            'show_llm_disabled_warning': self.on_show_llm_disabled_warning,
         }
 
         # Instantiate the core logic engine, passing the Config object
         self.logic = SurgicalEditorLogic(initial_data, self.config_manager, logic_callbacks)
+
+    def on_show_llm_disabled_warning(self):
+        """
+        Callback executed by SurgicalEditorLogic. Emits showLlmDisabledWarningSignal to JS.
+        """
+        self.showLlmDisabledWarningSignal.emit()
 
     # --- Methods called by Core Logic (SurgicalEditorLogic) to signal the UI via this Backend ---
 
@@ -119,7 +157,7 @@ class Backend(QObject):
             config_dict: The configuration dictionary (from config_manager.get_config()).
             queue_info: Information about the task queue.
         """
-        self.updateViewSignal.emit(data, config_dict, queue_info)
+        self.updateViewSignal.emit(json.dumps(data), json.dumps(config_dict), json.dumps(queue_info))
 
 
     def on_show_diff_preview(self, original_snippet: str, edited_snippet: str, before_context: str, after_context: str):
@@ -145,7 +183,7 @@ class Backend(QObject):
         Callback executed by SurgicalEditorLogic when a snippet has been located.
         Emits promptUserToConfirmLocationSignal to JS.
         """
-        self.promptUserToConfirmLocationSignal.emit(location_info, original_hint, original_instruction)
+        self.promptUserToConfirmLocationSignal.emit(json.dumps(location_info), original_hint, original_instruction)
 
     # --- Slots called by JavaScript UI to drive the Core Logic (SurgicalEditorLogic) ---
 
@@ -343,6 +381,13 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
 
         self.view = QWebEngineView()
+
+        # --- INJECT THE INTERCEPTOR ---
+        # This line is critical. It replaces the default page with our spy,
+        # ensuring it is active before any HTML or JavaScript is loaded.
+        self.view.setPage(JsConsoleInterceptor(self.view))
+        # --- END INJECTION ---
+
         self.channel = QWebChannel()
 
         # Create the Backend instance, passing the Config object
@@ -380,6 +425,7 @@ class MainWindow(QMainWindow):
 
 
         # Load the HTML file into the web view
+        logger.debug("PY TRACE (A): MainWindow is about to load frontend.html. Handing off to web engine.")
         self.view.setUrl(QUrl.fromLocalFile(html_path))
         self.setCentralWidget(self.view) # Make the web view the main content of the window
 
